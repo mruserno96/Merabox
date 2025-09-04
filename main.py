@@ -25,11 +25,14 @@ def extract_terabox_links(text: str):
     pattern = r"(https?://(?:www\.)?(?:terabox\.com|teraboxapp\.com|d\.terabox\.com|1024tera(?:box)?\.com)[^\s]*)"
     return re.findall(pattern, text)
 
+
 def resolve_terabox_link(url: str):
     """
-    Use unofficial Terabox resolver API to get direct video link
-    (Free public API: https://teraboxapi.com/)
+    Try resolving Terabox video link:
+    1. Use teraboxapi.com (fast)
+    2. Fallback: scrape HTML for .mp4 link
     """
+    # --- First try API ---
     try:
         api = "https://teraboxapi.com/api/v1/get"
         r = requests.get(api, params={"url": url}, timeout=15)
@@ -40,8 +43,23 @@ def resolve_terabox_link(url: str):
             size = int(data["data"].get("size", 0))
             return {"url": video_url, "name": filename, "size": size}
     except Exception as e:
-        print("Resolver error:", e)
+        print("API resolver error:", e)
+
+    # --- Fallback: Scraper ---
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=15)
+        html = r.text
+
+        match = re.search(r'(https?://[^\s]+\.mp4)', html)
+        if match:
+            video_url = match.group(1)
+            return {"url": video_url, "name": "video.mp4", "size": 0}
+    except Exception as e:
+        print("Scraper error:", e)
+
     return None
+
 
 async def download_file(session, url, filename):
     """Download video to TEMP_DIR"""
@@ -51,7 +69,7 @@ async def download_file(session, url, filename):
                 path = os.path.join(TEMP_DIR, filename)
                 with open(path, "wb") as f:
                     while True:
-                        chunk = await resp.content.read(1024*1024)
+                        chunk = await resp.content.read(1024 * 1024)
                         if not chunk:
                             break
                         f.write(chunk)
@@ -59,6 +77,7 @@ async def download_file(session, url, filename):
     except Exception as e:
         print("Download error:", e)
     return None
+
 
 async def send_video_with_cleanup(chat_id, video):
     async with aiohttp.ClientSession() as session:
@@ -75,6 +94,7 @@ async def send_video_with_cleanup(chat_id, video):
         else:
             await bot.send_message(chat_id, "⚠️ Failed to download video.")
 
+
 # ---------------- Bot Handlers ----------------
 
 @bot.message_handler(commands=["start"])
@@ -83,6 +103,7 @@ async def start_handler(message):
         message.chat.id,
         "👋 Welcome! Send me a Terabox / 1024Terabox link and I’ll fetch the video (≤50MB)."
     )
+
 
 @bot.message_handler(func=lambda m: True)
 async def handle_message(message):
@@ -93,12 +114,13 @@ async def handle_message(message):
     await bot.send_message(chat_id, f"🔎 Processing {len(links)} link(s)...")
     for link in links:
         video = resolve_terabox_link(link)
-        if video and video["size"] <= MAX_FILE_SIZE:
+        if video and (video["size"] == 0 or video["size"] <= MAX_FILE_SIZE):
             await send_video_with_cleanup(chat_id, video)
         elif video:
             await bot.send_message(chat_id, f"⚠️ {video['name']} is too large (>50MB).")
         else:
             await bot.send_message(chat_id, "❌ Could not fetch video link.")
+
 
 # ---------------- Flask Webhook ----------------
 
@@ -110,9 +132,11 @@ def webhook():
     asyncio.run(bot.process_new_updates([update]))
     return "!", 200
 
+
 def set_webhook():
     asyncio.run(bot.remove_webhook())
     asyncio.run(bot.set_webhook(url=WEBHOOK_URL))
+
 
 # ---------------- Run App ----------------
 
