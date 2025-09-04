@@ -9,7 +9,7 @@ import telebot.types
 
 # ---------------- Config ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Example: https://your-app.onrender.com
 TEMP_DIR = "downloads"
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
 
@@ -21,17 +21,12 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 # ---------------- Helper Functions ----------------
 
 def extract_terabox_links(text: str):
-    """Find Terabox/1024Terabox links in text"""
     pattern = r"(https?://(?:www\.)?(?:terabox\.com|teraboxapp\.com|d\.terabox\.com|1024tera(?:box)?\.com)[^\s]*)"
     return re.findall(pattern, text)
 
 
 def resolve_terabox_link(url: str):
-    """
-    Try resolving Terabox video link:
-    1. Use teraboxapi.com (fast)
-    2. Fallback: scrape HTML for .mp4 link
-    """
+    """Resolve Terabox/1024Terabox video link"""
     # --- First try API ---
     try:
         api = "https://teraboxapi.com/api/v1/get"
@@ -45,16 +40,14 @@ def resolve_terabox_link(url: str):
     except Exception as e:
         print("API resolver error:", e)
 
-    # --- Fallback: Scraper ---
+    # --- Fallback: scrape HTML for .mp4 ---
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get(url, headers=headers, timeout=15)
         html = r.text
-
         match = re.search(r'(https?://[^\s]+\.mp4)', html)
         if match:
-            video_url = match.group(1)
-            return {"url": video_url, "name": "video.mp4", "size": 0}
+            return {"url": match.group(1), "name": "video.mp4", "size": 0}
     except Exception as e:
         print("Scraper error:", e)
 
@@ -62,7 +55,6 @@ def resolve_terabox_link(url: str):
 
 
 async def download_file(session, url, filename):
-    """Download video to TEMP_DIR"""
     try:
         async with session.get(url) as resp:
             if resp.status == 200:
@@ -127,21 +119,26 @@ async def handle_message(message):
 @app.route("/", methods=["POST"])
 def webhook():
     json_str = request.get_data().decode("utf-8")
-    print("📩 Incoming update:", json_str)  # Debug logs
+    print("📩 Incoming update:", json_str)  # Debug
     update = telebot.types.Update.de_json(json_str)
     asyncio.run(bot.process_new_updates([update]))
     return "!", 200
 
 
-def set_webhook():
-    asyncio.run(bot.remove_webhook())
-    asyncio.run(bot.set_webhook(url=WEBHOOK_URL))
+def set_webhook_permanent():
+    """Always reset + set webhook"""
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
+        r = requests.post(url, data={"url": WEBHOOK_URL}, timeout=10)
+        print("🔗 Webhook response:", r.json())
+    except Exception as e:
+        print("Webhook set error:", e)
 
 
 # ---------------- Run App ----------------
 
 if __name__ == "__main__":
-    set_webhook()
+    set_webhook_permanent()
     port = int(os.environ.get("PORT", 10000))
-    print(f"🚀 Bot is running on port {port}, webhook set to {WEBHOOK_URL}")
+    print(f"🚀 Bot running on port {port}, webhook = {WEBHOOK_URL}")
     app.run(host="0.0.0.0", port=port)
