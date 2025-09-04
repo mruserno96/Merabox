@@ -1,144 +1,40 @@
-import os
-import re
-import asyncio
-import aiohttp
+from fastapi import FastAPI, Request
 import requests
-from flask import Flask, request
-from telebot.async_telebot import AsyncTeleBot
-import telebot.types
+import os
 
-# ---------------- Config ----------------
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Example: https://your-app.onrender.com
-TEMP_DIR = "downloads"
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # put in environment on server
+API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-bot = AsyncTeleBot(BOT_TOKEN)
-app = Flask(__name__)
+app = FastAPI()
 
-os.makedirs(TEMP_DIR, exist_ok=True)
+# Set your webhook URL: https://your-app.onrender.com/webhook
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    data = await request.json()
 
-# ---------------- Helper Functions ----------------
+    if "message" in data:
+        chat_id = data["message"]["chat"]["id"]
+        text = data["message"].get("text", "")
 
-def extract_terabox_links(text: str):
-    pattern = r"(https?://(?:www\.)?(?:terabox\.com|teraboxapp\.com|d\.terabox\.com|1024tera(?:box)?\.com)[^\s]*)"
-    return re.findall(pattern, text)
-
-
-def resolve_terabox_link(url: str):
-    """Resolve Terabox/1024Terabox video link"""
-    # --- First try API ---
-    try:
-        api = "https://teraboxapi.com/api/v1/get"
-        r = requests.get(api, params={"url": url}, timeout=15)
-        data = r.json()
-        if data.get("status") == "success":
-            video_url = data["data"]["download_link"]
-            filename = data["data"].get("name", "video.mp4")
-            size = int(data["data"].get("size", 0))
-            return {"url": video_url, "name": filename, "size": size}
-    except Exception as e:
-        print("API resolver error:", e)
-
-    # --- Fallback: scrape HTML for .mp4 ---
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=15)
-        html = r.text
-        match = re.search(r'(https?://[^\s]+\.mp4)', html)
-        if match:
-            return {"url": match.group(1), "name": "video.mp4", "size": 0}
-    except Exception as e:
-        print("Scraper error:", e)
-
-    return None
-
-
-async def download_file(session, url, filename):
-    try:
-        async with session.get(url) as resp:
-            if resp.status == 200:
-                path = os.path.join(TEMP_DIR, filename)
-                with open(path, "wb") as f:
-                    while True:
-                        chunk = await resp.content.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                return path
-    except Exception as e:
-        print("Download error:", e)
-    return None
-
-
-async def send_video_with_cleanup(chat_id, video):
-    async with aiohttp.ClientSession() as session:
-        file_path = await download_file(session, video["url"], video["name"])
-        if file_path:
-            try:
-                await bot.send_chat_action(chat_id, "upload_video")
-                with open(file_path, "rb") as f:
-                    await bot.send_video(chat_id, f, caption=video["name"])
-            except Exception as e:
-                await bot.send_message(chat_id, f"❌ Error sending video: {e}")
-            finally:
-                os.remove(file_path)
+        if "terabox" in text:
+            # TODO: implement terabox download logic
+            file_url = await get_terabox_link(text)
+            requests.post(f"{API_URL}/sendMessage", json={
+                "chat_id": chat_id,
+                "text": f"Download link: {file_url}"
+            })
         else:
-            await bot.send_message(chat_id, "⚠️ Failed to download video.")
+            requests.post(f"{API_URL}/sendMessage", json={
+                "chat_id": chat_id,
+                "text": "Send me a Terabox link."
+            })
+    return {"ok": True}
 
 
-# ---------------- Bot Handlers ----------------
-
-@bot.message_handler(commands=["start"])
-async def start_handler(message):
-    await bot.send_message(
-        message.chat.id,
-        "👋 Welcome! Send me a Terabox / 1024Terabox link and I’ll fetch the video (≤50MB)."
-    )
-
-
-@bot.message_handler(func=lambda m: True)
-async def handle_message(message):
-    links = extract_terabox_links(message.text)
-    if not links:
-        return
-    chat_id = message.chat.id
-    await bot.send_message(chat_id, f"🔎 Processing {len(links)} link(s)...")
-    for link in links:
-        video = resolve_terabox_link(link)
-        if video and (video["size"] == 0 or video["size"] <= MAX_FILE_SIZE):
-            await send_video_with_cleanup(chat_id, video)
-        elif video:
-            await bot.send_message(chat_id, f"⚠️ {video['name']} is too large (>50MB).")
-        else:
-            await bot.send_message(chat_id, "❌ Could not fetch video link.")
-
-
-# ---------------- Flask Webhook ----------------
-
-@app.route("/", methods=["POST"])
-def webhook():
-    json_str = request.get_data().decode("utf-8")
-    print("📩 Incoming update:", json_str)  # Debug
-    update = telebot.types.Update.de_json(json_str)
-    asyncio.run(bot.process_new_updates([update]))
-    return "!", 200
-
-
-def set_webhook_permanent():
-    """Always reset + set webhook"""
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
-        r = requests.post(url, data={"url": WEBHOOK_URL}, timeout=10)
-        print("🔗 Webhook response:", r.json())
-    except Exception as e:
-        print("Webhook set error:", e)
-
-
-# ---------------- Run App ----------------
-
-if __name__ == "__main__":
-    set_webhook_permanent()
-    port = int(os.environ.get("PORT", 10000))
-    print(f"🚀 Bot running on port {port}, webhook = {WEBHOOK_URL}")
-    app.run(host="0.0.0.0", port=port)
+async def get_terabox_link(url: str) -> str:
+    """
+    Here you implement terabox direct link generator
+    (either by scraping or using an API).
+    For now return dummy.
+    """
+    return "https://example.com/download.mp4"
