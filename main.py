@@ -1,5 +1,5 @@
 from flask import Flask, request
-import requests, os, tempfile, re
+import requests, os, tempfile, re, threading
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
@@ -32,35 +32,39 @@ def webhook():
         return {"ok": True}
 
     if any(domain in text for domain in VALID_DOMAINS):
+        # Fast reply
         send_message(chat_id, "⏱ Processing your link... Please wait.")
-        try:
-            video_path = extract_and_download(text)
-            if video_path:
-                send_video(chat_id, video_path)
-                os.remove(video_path)
-            else:
-                send_message(chat_id, "⚠️ Could not extract valid video link.")
-        except Exception as e:
-            print("❌ Exception:", e)
-            send_message(chat_id, "⚠️ Could not extract valid video link.")
+
+        # Background thread for heavy work
+        threading.Thread(target=process_video, args=(chat_id, text)).start()
     else:
         send_message(chat_id, "⚠️ Please send a valid Terabox link.")
 
     return {"ok": True}
 
 
-# ✅ Send text message
 def send_message(chat_id, text):
     requests.post(f"{API_URL}/sendMessage", json={"chat_id": chat_id, "text": text})
 
 
-# ✅ Send video file
 def send_video(chat_id, file_path):
     with open(file_path, "rb") as f:
         requests.post(f"{API_URL}/sendVideo", data={"chat_id": chat_id}, files={"video": f})
 
 
-# ✅ Extract video links and download
+def process_video(chat_id, url):
+    try:
+        video_path = extract_and_download(url)
+        if video_path:
+            send_video(chat_id, video_path)
+            os.remove(video_path)
+        else:
+            send_message(chat_id, "⚠️ Could not extract valid video link.")
+    except Exception as e:
+        print("❌ Exception:", e)
+        send_message(chat_id, "⚠️ Could not extract valid video link.")
+
+
 def extract_and_download(url: str):
     session = requests.Session()
     res = session.get(url, allow_redirects=True, timeout=30)
@@ -85,10 +89,10 @@ def extract_and_download(url: str):
         data = r.json()
     except Exception as e:
         print("❌ JSON decode failed:", str(e))
-        print("Response content:", r.text[:500])  # Debugging
+        print("Response content:", r.text[:500])
         return None
 
-    # Collect all video links
+    # Collect video links
     links = []
     def collect(obj):
         if isinstance(obj, dict):
