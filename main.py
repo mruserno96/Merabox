@@ -13,7 +13,8 @@ VALID_DOMAINS = [
     "terabox.app",
     "1024tera.com",
     "teraboxapp.com",
-    "1024terabox.com"
+    "1024terabox.com",
+    "1024terabox.com",
 ]
 
 app = Flask(__name__)
@@ -38,7 +39,7 @@ def webhook():
         if any(domain in text for domain in VALID_DOMAINS):
             send_message(chat_id, "⏳ Processing your Terabox link... Please wait.")
             try:
-                video_path = download_terabox_highest_quality(text)
+                video_path = extract_and_download(text)
                 if video_path:
                     send_video(chat_id, video_path)
                     os.remove(video_path)
@@ -52,7 +53,7 @@ def webhook():
     return {"ok": True}
 
 
-# ✅ Send message
+# ✅ Send text
 def send_message(chat_id, text):
     requests.post(f"{API_URL}/sendMessage", json={
         "chat_id": chat_id,
@@ -66,46 +67,37 @@ def send_video(chat_id, file_path):
         requests.post(f"{API_URL}/sendVideo", data={"chat_id": chat_id}, files={"video": f})
 
 
-# ✅ Extract & download highest quality video
-def download_terabox_highest_quality(url: str):
+# ✅ Extractor (scrape + API fallback)
+def extract_and_download(url: str):
     session = requests.Session()
     res = session.get(url, allow_redirects=True, timeout=30)
-
     html = res.text
     final_url = res.url
     print("🔗 Resolved URL:", final_url)
 
-    # Step 1: find JSON in page
-    json_match = re.search(r'window\.playInfo\s*=\s*(\{.*?\});', html, re.DOTALL)
-
-    if not json_match:
-        print("❌ No playInfo JSON found")
-        return None
-
-    try:
-        playinfo = json.loads(json_match.group(1))
-    except Exception as e:
-        print("❌ JSON parse error:", e)
-        return None
-
-    # Step 2: collect video links
     video_links = []
 
-    if "urls" in playinfo:
-        video_links = playinfo["urls"]
-    elif "videoInfo" in playinfo:
-        for item in playinfo["videoInfo"]:
-            if isinstance(item, dict) and "src" in item:
-                video_links.append(item["src"])
+    # Try to parse window.playInfo JSON
+    json_match = re.search(r'window\.playInfo\s*=\s*(\{.*?\});', html, re.DOTALL)
+    if json_match:
+        try:
+            playinfo = json.loads(json_match.group(1))
+            video_links = collect_video_links(playinfo)
+        except:
+            pass
+
+    # If nothing found → try API fallback
+    if not video_links:
+        api_links = extract_via_api(html)
+        if api_links:
+            video_links = api_links
 
     if not video_links:
-        print("❌ No video URLs inside playInfo")
         return None
 
-    # Step 3: choose highest quality
+    # Pick highest quality (1080 > 720 > 480 > 360)
     preferred_order = ["1080", "720", "480", "360"]
     selected_url = None
-
     for quality in preferred_order:
         for link in video_links:
             if quality in link:
@@ -113,15 +105,13 @@ def download_terabox_highest_quality(url: str):
                 break
         if selected_url:
             break
-
     if not selected_url:
         selected_url = video_links[0]
 
     print("🎬 Selected video URL:", selected_url)
 
-    # Step 4: download video
+    # Download video
     video_res = session.get(selected_url, stream=True, timeout=120)
-
     if video_res.status_code == 200:
         tmp_file = tempfile.mktemp(suffix=".mp4")
         with open(tmp_file, "wb") as f:
@@ -131,6 +121,45 @@ def download_terabox_highest_quality(url: str):
         return tmp_file
 
     return None
+
+
+# ✅ Collect video links recursively from JSON
+def collect_video_links(obj):
+    video_links = []
+    def _scan(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if isinstance(v, str) and (".mp4" in v or ".mkv" in v or ".webm" in v):
+                    video_links.append(v.replace("\\u002F", "/"))
+                else:
+                    _scan(v)
+        elif isinstance(o, list):
+            for item in o:
+                _scan(item)
+    _scan(obj)
+    return video_links
+
+
+# ✅ API fallback extractor
+def extract_via_api(html):
+    try:
+        shareid_match = re.search(r"shareid=(\d+)", html)
+        uk_match = re.search(r"uk=(\d+)", html)
+        if not shareid_match or not uk_match:
+            return []
+
+        shareid = shareid_match.group(1)
+        uk = uk_match.group(1)
+
+        api_url = f"https://www.terabox.com/api/play/playinfo?shareid={shareid}&uk={uk}"
+        print("📡 Calling API:", api_url)
+        res = requests.get(api_url, timeout=30)
+        data = res.json()
+
+        return collect_video_links(data)
+    except Exception as e:
+        print("❌ API fallback failed:", e)
+        return []
 
 
 if __name__ == "__main__":
