@@ -3,8 +3,9 @@ import requests
 import os
 import tempfile
 import re
+import json
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # Render me set karo
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # Render dashboard me set karna
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 VALID_DOMAINS = [
@@ -24,23 +25,20 @@ def home():
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json(force=True)
-    print("📩 Incoming update:", data)  # debug console
+    print("📩 Incoming update:", data)
 
     if "message" in data:
         chat_id = data["message"]["chat"]["id"]
         text = data["message"].get("text", "")
 
-        # /start command
         if text == "/start":
             send_message(chat_id, "👋 Welcome!\nSend me a Terabox link and I’ll fetch the highest quality video for you.")
             return {"ok": True}
 
-        # Check for Terabox domains
         if any(domain in text for domain in VALID_DOMAINS):
             send_message(chat_id, "⏳ Processing your Terabox link... Please wait.")
             try:
                 video_path = download_terabox_highest_quality(text)
-
                 if video_path:
                     send_video(chat_id, video_path)
                     os.remove(video_path)
@@ -53,19 +51,22 @@ def webhook():
 
     return {"ok": True}
 
-# ✅ Send text
+
+# ✅ Send message
 def send_message(chat_id, text):
     requests.post(f"{API_URL}/sendMessage", json={
         "chat_id": chat_id,
         "text": text
     })
 
+
 # ✅ Send video file
 def send_video(chat_id, file_path):
     with open(file_path, "rb") as f:
         requests.post(f"{API_URL}/sendVideo", data={"chat_id": chat_id}, files={"video": f})
 
-# ✅ Extract highest quality video and download
+
+# ✅ Extract & download highest quality video
 def download_terabox_highest_quality(url: str):
     session = requests.Session()
     res = session.get(url, allow_redirects=True, timeout=30)
@@ -74,19 +75,37 @@ def download_terabox_highest_quality(url: str):
     final_url = res.url
     print("🔗 Resolved URL:", final_url)
 
-    # Extract video links (mp4/mkv/webm/mov)
-    matches = re.findall(r'"src":"(https:[^"]+\.(?:mp4|mkv|webm|mov)[^"]*)"', html)
+    # Step 1: find JSON in page
+    json_match = re.search(r'window\.playInfo\s*=\s*(\{.*?\});', html, re.DOTALL)
 
-    if not matches:
+    if not json_match:
+        print("❌ No playInfo JSON found")
         return None
 
-    # Clean escape sequences
-    video_links = [m.replace("\\u002F", "/") for m in matches]
+    try:
+        playinfo = json.loads(json_match.group(1))
+    except Exception as e:
+        print("❌ JSON parse error:", e)
+        return None
 
-    # Prefer highest quality (1080p > 720p > 480p > 360p)
+    # Step 2: collect video links
+    video_links = []
+
+    if "urls" in playinfo:
+        video_links = playinfo["urls"]
+    elif "videoInfo" in playinfo:
+        for item in playinfo["videoInfo"]:
+            if isinstance(item, dict) and "src" in item:
+                video_links.append(item["src"])
+
+    if not video_links:
+        print("❌ No video URLs inside playInfo")
+        return None
+
+    # Step 3: choose highest quality
     preferred_order = ["1080", "720", "480", "360"]
-
     selected_url = None
+
     for quality in preferred_order:
         for link in video_links:
             if quality in link:
@@ -95,13 +114,12 @@ def download_terabox_highest_quality(url: str):
         if selected_url:
             break
 
-    # If nothing matched, just take first
     if not selected_url:
         selected_url = video_links[0]
 
     print("🎬 Selected video URL:", selected_url)
 
-    # Download the video
+    # Step 4: download video
     video_res = session.get(selected_url, stream=True, timeout=120)
 
     if video_res.status_code == 200:
@@ -113,6 +131,7 @@ def download_terabox_highest_quality(url: str):
         return tmp_file
 
     return None
+
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
