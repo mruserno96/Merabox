@@ -5,6 +5,7 @@ import asyncio
 import aiohttp
 from flask import Flask, request
 from telebot.async_telebot import AsyncTeleBot
+import telebot.types   # ✅ needed for Update parsing
 
 # ---------------- Config ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -110,7 +111,11 @@ async def handle_message(message):
 @app.route("/", methods=["POST"])
 def webhook():
     json_str = request.get_data().decode("utf-8")
-    update = bot.types.Update.de_json(json_str)
+
+    # Debug log (optional, shows raw Telegram update in Render logs)
+    print("📩 Incoming update JSON:", json_str)
+
+    update = telebot.types.Update.de_json(json_str)  # ✅ fixed
     asyncio.run(bot.process_new_updates([update]))
     return "!", 200
 
@@ -123,5 +128,5 @@ def set_webhook():
 if __name__ == "__main__":
     set_webhook()
     port = int(os.environ.get("PORT", 10000))
-    print("🚀 Bot is running on port", port, "Webhook:", WEBHOOK_URL)
+    print(f"🚀 Bot is running on port {port}, webhook set to {WEBHOOK_URL}")
     app.run(host="0.0.0.0", port=port)
