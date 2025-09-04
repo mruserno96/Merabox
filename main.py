@@ -1,11 +1,11 @@
 import os
 import re
-import requests
 import asyncio
 import aiohttp
+import requests
 from flask import Flask, request
 from telebot.async_telebot import AsyncTeleBot
-import telebot.types   # ✅ needed for Update parsing
+import telebot.types
 
 # ---------------- Config ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -20,32 +20,31 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 
 # ---------------- Helper Functions ----------------
 
-def extract_terabox_links(text):
-    pattern = r"(https?://(?:www\.)?(?:terabox\.com|teraboxapp\.com|d\.terabox\.com|1024tera\.com)[^\s]*)"
+def extract_terabox_links(text: str):
+    """Find Terabox/1024Terabox links in text"""
+    pattern = r"(https?://(?:www\.)?(?:terabox\.com|teraboxapp\.com|d\.terabox\.com|1024tera(?:box)?\.com)[^\s]*)"
     return re.findall(pattern, text)
 
-def get_file_list_1024tera(url):
-    """Parse 1024Tera folder link and get video URLs"""
-    headers = {"User-Agent": "Mozilla/5.0"}
-    if "/sharing/" in url:
-        url = url.replace("/sharing/link?", "/wap/share/filelist?")
+def resolve_terabox_link(url: str):
+    """
+    Use unofficial Terabox resolver API to get direct video link
+    (Free public API: https://teraboxapi.com/)
+    """
     try:
-        r = requests.get(url, headers=headers).json()
-        files = []
-        for item in r.get("file_list", []):
-            if item["file_type"].startswith("video") and item["file_size"] <= MAX_FILE_SIZE:
-                files.append({
-                    "name": item["file_name"],
-                    "size": item["file_size"],
-                    "download_url": item.get("download_url")  # placeholder
-                })
-        return files
+        api = "https://teraboxapi.com/api/v1/get"
+        r = requests.get(api, params={"url": url}, timeout=15)
+        data = r.json()
+        if data.get("status") == "success":
+            video_url = data["data"]["download_link"]
+            filename = data["data"].get("name", "video.mp4")
+            size = int(data["data"].get("size", 0))
+            return {"url": video_url, "name": filename, "size": size}
     except Exception as e:
-        print("Error fetching folder:", e)
-        return []
+        print("Resolver error:", e)
+    return None
 
 async def download_file(session, url, filename):
-    """Async download file"""
+    """Download video to TEMP_DIR"""
     try:
         async with session.get(url) as resp:
             if resp.status == 200:
@@ -61,24 +60,20 @@ async def download_file(session, url, filename):
         print("Download error:", e)
     return None
 
-async def send_video_with_cleanup(chat_id, url, filename):
+async def send_video_with_cleanup(chat_id, video):
     async with aiohttp.ClientSession() as session:
-        file_path = await download_file(session, url, filename)
+        file_path = await download_file(session, video["url"], video["name"])
         if file_path:
             try:
                 await bot.send_chat_action(chat_id, "upload_video")
                 with open(file_path, "rb") as f:
-                    await bot.send_video(chat_id, f)
+                    await bot.send_video(chat_id, f, caption=video["name"])
             except Exception as e:
-                await bot.send_message(chat_id, f"Error sending video: {e}")
+                await bot.send_message(chat_id, f"❌ Error sending video: {e}")
             finally:
                 os.remove(file_path)
-
-async def send_folder_files(chat_id, files):
-    total = len(files)
-    for idx, f in enumerate(files, 1):
-        await send_video_with_cleanup(chat_id, f["download_url"], f["name"])
-        await bot.send_message(chat_id, f"{idx}/{total} videos sent. Remaining: {total-idx}")
+        else:
+            await bot.send_message(chat_id, "⚠️ Failed to download video.")
 
 # ---------------- Bot Handlers ----------------
 
@@ -86,7 +81,7 @@ async def send_folder_files(chat_id, files):
 async def start_handler(message):
     await bot.send_message(
         message.chat.id,
-        "👋 Hello! Send me a Terabox or 1024Tera link and I’ll fetch videos under 50 MB for you."
+        "👋 Welcome! Send me a Terabox / 1024Terabox link and I’ll fetch the video (≤50MB)."
     )
 
 @bot.message_handler(func=lambda m: True)
@@ -95,27 +90,23 @@ async def handle_message(message):
     if not links:
         return
     chat_id = message.chat.id
-    await bot.send_message(chat_id, f"Processing {len(links)} link(s)...")
+    await bot.send_message(chat_id, f"🔎 Processing {len(links)} link(s)...")
     for link in links:
-        if "1024tera.com" in link:
-            files = get_file_list_1024tera(link)
-            if files:
-                await send_folder_files(chat_id, files)
-            else:
-                await bot.send_message(chat_id, "⚠️ No video found under 50 MB.")
+        video = resolve_terabox_link(link)
+        if video and video["size"] <= MAX_FILE_SIZE:
+            await send_video_with_cleanup(chat_id, video)
+        elif video:
+            await bot.send_message(chat_id, f"⚠️ {video['name']} is too large (>50MB).")
         else:
-            await bot.send_message(chat_id, "📌 Direct Terabox link handling coming soon.")
+            await bot.send_message(chat_id, "❌ Could not fetch video link.")
 
 # ---------------- Flask Webhook ----------------
 
 @app.route("/", methods=["POST"])
 def webhook():
     json_str = request.get_data().decode("utf-8")
-
-    # Debug log (optional, shows raw Telegram update in Render logs)
-    print("📩 Incoming update JSON:", json_str)
-
-    update = telebot.types.Update.de_json(json_str)  # ✅ fixed
+    print("📩 Incoming update:", json_str)  # Debug logs
+    update = telebot.types.Update.de_json(json_str)
     asyncio.run(bot.process_new_updates([update]))
     return "!", 200
 
