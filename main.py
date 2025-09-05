@@ -15,6 +15,10 @@ VALID_DOMAINS = [
     "1024terabox.com",
 ]
 
+MOBILE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1"
+}
+
 app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
@@ -81,87 +85,31 @@ def process_video(chat_id, url):
 
 # ✅ URL normalizer
 def normalize_url(url: str) -> str:
-    if "/wap/share/filelist?surl=" in url:
-        surl = re.search(r"surl=([a-zA-Z0-9_-]+)", url)
-        if surl:
-            return f"https://www.1024tera.com/share/{surl.group(1)}"
+    # don’t convert wap/filelist to /share anymore — handle directly
     return url
 
 
 # ✅ Extractor
 def extract_and_download(url: str, chat_id=None):
-    url = normalize_url(url)
-    print("🔗 Normalized URL:", url, flush=True)
-    if chat_id:
-        debug_log(chat_id, f"🔗 Normalized URL:\n{url}")
-
     session = requests.Session()
-    res = session.get(url, allow_redirects=True, timeout=30)
+
+    # Use mobile headers for WAP links
+    if "/wap/share/filelist" in url:
+        res = session.get(url, headers=MOBILE_HEADERS, allow_redirects=True, timeout=30)
+    else:
+        res = session.get(url, allow_redirects=True, timeout=30)
+
     html = res.text
-    print("🔎 HTML Preview:", html[:500], flush=True)
+    print("🔎 Full HTML Length:", len(html), flush=True)
     if chat_id:
-        debug_log(chat_id, "🔎 HTML Preview:\n" + html[:500])
+        debug_log(chat_id, f"🔎 HTML Length: {len(html)}")
+        debug_log(chat_id, "🔎 HTML Dump (first 5000 chars):\n" + html[:5000])
 
-    video_links = []
-
-    # Method 1: JSON inside HTML
-    m = re.search(r'window\.playInfo\s*=\s*(\{.*?\});', html, re.DOTALL)
-    if m:
-        try:
-            data = json.loads(m.group(1))
-            video_links = collect_video_links(data)
-            print("✅ Found links in window.playInfo:", video_links, flush=True)
-            if chat_id:
-                debug_log(chat_id, "✅ Found links in window.playInfo:\n" + str(video_links))
-        except Exception as e:
-            print("❌ Failed HTML JSON parse:", e, flush=True)
-
-    # Method 2: API with surl
-    if not video_links:
-        surl = re.search(r"surl=([a-zA-Z0-9_-]+)", url)
-        if surl:
-            api = f"https://www.1024tera.com/api/play/playinfo?surl={surl.group(1)}"
-            print("📡 Trying API with surl:", api, flush=True)
-            if chat_id:
-                debug_log(chat_id, "📡 Trying API with surl:\n" + api)
-            r = session.get(api, timeout=30)
-            print("🔎 API Response Preview:", r.text[:500], flush=True)
-            if chat_id:
-                debug_log(chat_id, "🔎 API Response Preview:\n" + r.text[:500])
-            try:
-                data = r.json()
-                video_links = collect_video_links(data)
-                print("✅ Found links in surl API:", video_links, flush=True)
-            except Exception as e:
-                print("❌ surl API failed:", e, flush=True)
-
-    if not video_links:
-        print("⚠️ No video links found at all", flush=True)
-        if chat_id:
-            debug_log(chat_id, "⚠️ No video links found at all")
-        return None
-
-    # Pick highest quality
-    pref = ["1080", "720", "480", "360"]
-    selected = next((l for q in pref for l in video_links if q in l), video_links[0])
-    print("🎬 Selected:", selected, flush=True)
-    if chat_id:
-        debug_log(chat_id, "🎬 Selected:\n" + selected)
-
-    # Download video
-    vres = session.get(selected, stream=True, timeout=120)
-    if vres.status_code == 200:
-        tmp = tempfile.mktemp(suffix=".mp4")
-        with open(tmp, "wb") as f:
-            for chunk in vres.iter_content(1024*1024):
-                if chunk:
-                    f.write(chunk)
-        return tmp
-
+    # Right now only debugging, not extracting
     return None
 
 
-# ✅ Collect links recursively
+# ✅ Collect links recursively (future use)
 def collect_video_links(obj):
     links = []
     def _scan(o):
