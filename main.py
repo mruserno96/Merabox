@@ -1,7 +1,7 @@
 from flask import Flask, request
-import requests, os, tempfile, re, json, threading, sys
+import requests, os, tempfile, re, sys, threading
+from urllib.parse import urlparse, parse_qs
 
-# Force log flushing
 sys.stdout.reconfigure(line_buffering=True)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -46,8 +46,7 @@ def webhook():
         send_message(chat_id, "⏱ Processing your link... Please wait.")
         threading.Thread(target=process_video, args=(chat_id, text)).start()
     else:
-        send_message(chat_id, "⚠️ That doesn’t look like a Terabox link.\nValid domains:\n- 1024tera.com\n- terabox.fun\n- terabox.app\n- teraboxapp.com")
-
+        send_message(chat_id, "⚠️ That doesn’t look like a Terabox link.")
     return {"ok": True}
 
 
@@ -62,20 +61,23 @@ def send_video(chat_id, file_path):
 
 
 def debug_log(chat_id, text):
-    """Send debug info directly to Telegram (for free Render plan)"""
     try:
         requests.post(f"{API_URL}/sendMessage", json={"chat_id": chat_id, "text": text[:3500]})
     except:
         pass
 
 
-# ✅ Background processor
+# ✅ Worker
 def process_video(chat_id, url):
     try:
-        video_path = extract_and_download(url, chat_id)
-        if video_path:
-            send_video(chat_id, video_path)
-            os.remove(video_path)
+        video_url = extract_video_url(url, chat_id)
+        if video_url:
+            send_message(chat_id, f"✅ Found Video Link:\n{video_url}")
+            # If file small enough, download & send
+            path = download_video(video_url)
+            if path:
+                send_video(chat_id, path)
+                os.remove(path)
         else:
             send_message(chat_id, "⚠️ Could not extract valid video link.")
     except Exception as e:
@@ -83,47 +85,52 @@ def process_video(chat_id, url):
         send_message(chat_id, "⚠️ Could not extract valid video link.")
 
 
-# ✅ URL normalizer
-def normalize_url(url: str) -> str:
-    # don’t convert wap/filelist to /share anymore — handle directly
-    return url
-
-
-# ✅ Extractor
-def extract_and_download(url: str, chat_id=None):
-    session = requests.Session()
-
-    # Use mobile headers for WAP links
-    if "/wap/share/filelist" in url:
-        res = session.get(url, headers=MOBILE_HEADERS, allow_redirects=True, timeout=30)
-    else:
-        res = session.get(url, allow_redirects=True, timeout=30)
-
+def extract_video_url(url: str, chat_id=None):
+    res = requests.get(url, headers=MOBILE_HEADERS, timeout=30)
     html = res.text
-    print("🔎 Full HTML Length:", len(html), flush=True)
+
+    # Extract og:image
+    m = re.search(r'<meta property="og:image" content="([^"]+)"', html)
+    if not m:
+        if chat_id:
+            debug_log(chat_id, "❌ og:image not found")
+        return None
+
+    og_image = m.group(1)
     if chat_id:
-        debug_log(chat_id, f"🔎 HTML Length: {len(html)}")
-        debug_log(chat_id, "🔎 HTML Dump (first 5000 chars):\n" + html[:5000])
+        debug_log(chat_id, f"🔎 og:image:\n{og_image}")
 
-    # Right now only debugging, not extracting
-    return None
+    # Parse query params
+    parsed = urlparse(og_image)
+    params = parse_qs(parsed.query)
+
+    fid = params.get("fid", [""])[0]
+    sign = params.get("sign", [""])[0]
+    ts = params.get("time", [""])[0]
+    vuk = params.get("vuk", [""])[0]
+
+    if not all([fid, sign, ts, vuk]):
+        if chat_id:
+            debug_log(chat_id, f"❌ Missing params: fid={fid}, sign={sign}, time={ts}, vuk={vuk}")
+        return None
+
+    # Build test streaming link
+    video_url = f"https://data.1024tera.com/streaming?fid={fid}&time={ts}&sign={sign}&vuk={vuk}"
+    return video_url
 
 
-# ✅ Collect links recursively (future use)
-def collect_video_links(obj):
-    links = []
-    def _scan(o):
-        if isinstance(o, dict):
-            for v in o.values():
-                _scan(v)
-        elif isinstance(o, list):
-            for i in o:
-                _scan(i)
-        elif isinstance(o, str):
-            if any(ext in o for ext in [".mp4", ".mkv", ".webm", ".mov"]):
-                links.append(o.replace("\\u002F", "/"))
-    _scan(obj)
-    return links
+def download_video(video_url):
+    try:
+        r = requests.get(video_url, stream=True, timeout=60)
+        r.raise_for_status()
+        fd, path = tempfile.mkstemp(suffix=".mp4")
+        with os.fdopen(fd, "wb") as f:
+            for chunk in r.iter_content(1024 * 1024):
+                f.write(chunk)
+        return path
+    except Exception as e:
+        print("❌ Download error:", e, flush=True)
+        return None
 
 
 if __name__ == "__main__":
