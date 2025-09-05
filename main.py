@@ -65,17 +65,12 @@ def process_video(chat_id, url):
         send_message(chat_id, "⚠️ Could not extract valid video link.")
 
 
-# ✅ Extractor with Debug Logging
+# ✅ Extractor with direct logs
 def extract_and_download(url: str):
     session = requests.Session()
     res = session.get(url, allow_redirects=True, timeout=30)
     html = res.text
-
-    # Save HTML for debugging
-    with open("debug.log", "w", encoding="utf-8") as f:
-        f.write(html[:5000])  # save first 5000 chars
-
-    print("Resolved URL:", res.url)
+    print("🔎 HTML Preview:", html[:500])  # show first 500 chars
 
     video_links = []
 
@@ -85,7 +80,7 @@ def extract_and_download(url: str):
         try:
             data = json.loads(m.group(1))
             video_links = collect_video_links(data)
-            print("✅ Found links in window.playInfo:", len(video_links))
+            print("✅ Found links in window.playInfo:", video_links)
         except Exception as e:
             print("❌ Failed HTML JSON parse:", e)
 
@@ -96,14 +91,13 @@ def extract_and_download(url: str):
             api = f"https://www.1024tera.com/api/play/playinfo?surl={surl.group(1)}"
             print("📡 Trying API with surl:", api)
             r = session.get(api, timeout=30)
-            with open("debug_api.log", "w", encoding="utf-8") as f:
-                f.write(r.text[:5000])
+            print("🔎 API Response Preview:", r.text[:500])
             try:
                 data = r.json()
                 video_links = collect_video_links(data)
-                print("✅ Found links in surl API:", len(video_links))
+                print("✅ Found links in surl API:", video_links)
             except Exception as e:
-                print("❌ surl API failed:", e, r.text[:200])
+                print("❌ surl API failed:", e)
 
     # Method 3: API with shareid & uk
     if not video_links:
@@ -113,14 +107,13 @@ def extract_and_download(url: str):
             api = f"https://www.terabox.com/api/play/playinfo?shareid={shareid.group(1)}&uk={uk.group(1)}"
             print("📡 Trying API with shareid & uk:", api)
             r = session.get(api, timeout=30)
-            with open("debug_api2.log", "w", encoding="utf-8") as f:
-                f.write(r.text[:5000])
+            print("🔎 API Response 2 Preview:", r.text[:500])
             try:
                 data = r.json()
                 video_links = collect_video_links(data)
-                print("✅ Found links in shareid+uk API:", len(video_links))
+                print("✅ Found links in shareid+uk API:", video_links)
             except Exception as e:
-                print("❌ shareid+uk API failed:", e, r.text[:200])
+                print("❌ shareid+uk API failed:", e)
 
     if not video_links:
         print("⚠️ No video links found at all")
