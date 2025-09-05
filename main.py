@@ -30,17 +30,19 @@ def webhook():
         return {"ok": True}
 
     chat_id = data["message"]["chat"]["id"]
-    text = data["message"].get("text", "")
+    text = data["message"].get("text", "").strip()
 
     if text == "/start":
         send_message(chat_id, "👋 Welcome!\nSend me a Terabox link and I’ll fetch the highest quality video for you.")
         return {"ok": True}
 
+    print(f"🔎 Received text: {text}", flush=True)
+
     if any(domain in text for domain in VALID_DOMAINS):
         send_message(chat_id, "⏱ Processing your link... Please wait.")
         threading.Thread(target=process_video, args=(chat_id, text)).start()
     else:
-        send_message(chat_id, "⚠️ Please send a valid Terabox link.")
+        send_message(chat_id, "⚠️ That doesn’t look like a Terabox link.\nValid domains:\n- 1024tera.com\n- terabox.fun\n- terabox.app\n- teraboxapp.com")
 
     return {"ok": True}
 
