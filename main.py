@@ -1,7 +1,5 @@
 from flask import Flask, request
-import os, threading, tempfile, asyncio
-from playwright.async_api import async_playwright
-import requests, json, re, sys
+import os, requests, re, threading, json, tempfile, sys
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -15,6 +13,11 @@ VALID_DOMAINS = [
     "teraboxapp.com",
     "1024terabox.com",
 ]
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
+}
 
 app = Flask(__name__)
 
@@ -34,18 +37,18 @@ def webhook():
     text = data["message"].get("text", "").strip()
 
     if text == "/start":
-        send_message(chat_id, "👋 Welcome!\nSend me a Terabox shortlink and I’ll fetch the video for you.")
+        send_message(chat_id, "👋 Welcome!\nSend me a Terabox /share/filelist?surl=XXXXX link and I’ll fetch the video link.")
         return {"ok": True}
 
     if any(domain in text for domain in VALID_DOMAINS):
         send_message(chat_id, "⏱ Processing your link... Please wait.")
-        threading.Thread(target=lambda: asyncio.run(process_video(chat_id, text))).start()
+        threading.Thread(target=process_video, args=(chat_id, text)).start()
     else:
-        send_message(chat_id, "⚠️ That doesn’t look like a Terabox link.")
+        send_message(chat_id, "⚠️ That doesn’t look like a valid Terabox link.")
     return {"ok": True}
 
 
-# ✅ Telegram helpers
+# ================= Helper Functions =================
 def send_message(chat_id, text):
     requests.post(f"{API_URL}/sendMessage", json={"chat_id": chat_id, "text": text})
 
@@ -53,68 +56,57 @@ def send_video(chat_id, file_path):
     with open(file_path, "rb") as f:
         requests.post(f"{API_URL}/sendVideo", data={"chat_id": chat_id}, files={"video": f})
 
-def debug_log(chat_id, text):
+def fetch_html(url):
     try:
-        requests.post(f"{API_URL}/sendMessage", json={"chat_id": chat_id, "text": text[:3500]})
-    except:
-        pass
-
-
-# ================== Playwright Extractor ==================
-async def process_video(chat_id, url):
-    try:
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True)
-            context = await browser.new_context()
-            page = await context.new_page()
-
-            await page.goto(url, timeout=60000)
-            await page.wait_for_load_state("networkidle", timeout=60000)
-
-            # Extract window.file_list or window.playInfo
-            file_list = await page.evaluate("window.file_list || window.playInfo || null")
-            if not file_list:
-                send_message(chat_id, "⚠️ Could not extract file info from page.")
-                await browser.close()
-                return
-
-            # Convert to JSON string for debug
-            file_json = json.dumps(file_list, indent=2)
-            debug_log(chat_id, "🔎 file_list JSON:\n" + file_json[:3500])
-
-            # Extract parameters
-            # fs_id, sign, uk, timestamp, surl
-            try:
-                file0 = file_list[0] if isinstance(file_list, list) else list(file_list.values())[0]
-                fs_id = file0.get("fs_id")
-                sign = file0.get("sign")
-                uk = file0.get("uk")
-                timestamp = file0.get("timestamp") or file0.get("time") or 0
-                surl = file0.get("surl") or ""
-
-                if not all([fs_id, sign, uk]):
-                    send_message(chat_id, "⚠️ Missing required parameters in file info.")
-                    await browser.close()
-                    return
-
-                # Build playable video URL
-                video_url = f"https://www.1024tera.com/api/play/playinfo?app_id=250528&fid_list=[{fs_id}]&sign={sign}&timestamp={timestamp}&uk={uk}&surl={surl}"
-                send_message(chat_id, f"✅ Playable Video URL:\n{video_url}")
-
-                # Optional: download and send video (if <50MB)
-                path = download_video(video_url)
-                if path:
-                    send_video(chat_id, path)
-                    os.remove(path)
-
-            except Exception as e:
-                send_message(chat_id, f"❌ Error parsing file info: {e}")
-
-            await browser.close()
-
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        return r.text
     except Exception as e:
-        print("❌ Exception:", e, flush=True)
-        send_message(chat_id, f"⚠️ Could not process the link: {e}")
+        print("❌ Fetch HTML error:", e, flush=True)
+        return None
+
+
+# ================= Core Processing =================
+def process_video(chat_id, url):
+    html = fetch_html(url)
+    if not html:
+        send_message(chat_id, "⚠️ Could not fetch page HTML.")
+        return
+
+    # Extract playinfo API JSON from HTML <script> block
+    match = re.search(r'window\.file_list\s*=\s*(\{.*?\}|\[.*?\]);', html, re.DOTALL)
+    if not match:
+        send_message(chat_id, "⚠️ Could not extract file_list from HTML.")
+        return
+
+    try:
+        file_list = json.loads(match.group(1))
+    except Exception as e:
+        send_message(chat_id, f"❌ JSON parse error: {e}")
+        return
+
+    # Pick first file
+    file0 = file_list[0] if isinstance(file_list, list) else list(file_list.values())[0]
+
+    fs_id = file0.get("fs_id")
+    sign = file0.get("sign")
+    uk = file0.get("uk")
+    timestamp = file0.get("time") or 0
+    surl = file0.get("surl") or ""
+
+    if not all([fs_id, sign, uk]):
+        send_message(chat_id, "⚠️ Missing required parameters to generate video link.")
+        return
+
+    # Build playable video URL
+    video_url = f"https://www.1024tera.com/api/play/playinfo?app_id=250528&fid_list=[{fs_id}]&sign={sign}&timestamp={timestamp}&uk={uk}&surl={surl}"
+    send_message(chat_id, f"✅ Playable Video URL:\n{video_url}")
+
+    # Optional: download video (size <50MB)
+    path = download_video(video_url)
+    if path:
+        send_video(chat_id, path)
+        os.remove(path)
 
 
 def download_video(video_url):
