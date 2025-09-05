@@ -65,16 +65,21 @@ def process_video(chat_id, url):
         send_message(chat_id, "⚠️ Could not extract valid video link.")
 
 
-# ✅ Extract video (multi-method)
+# ✅ Extractor with Debug Logging
 def extract_and_download(url: str):
     session = requests.Session()
     res = session.get(url, allow_redirects=True, timeout=30)
     html = res.text
+
+    # Save HTML for debugging
+    with open("debug.log", "w", encoding="utf-8") as f:
+        f.write(html[:5000])  # save first 5000 chars
+
     print("Resolved URL:", res.url)
 
     video_links = []
 
-    # Method 1: JSON in HTML
+    # Method 1: JSON inside HTML
     m = re.search(r'window\.playInfo\s*=\s*(\{.*?\});', html, re.DOTALL)
     if m:
         try:
@@ -91,6 +96,8 @@ def extract_and_download(url: str):
             api = f"https://www.1024tera.com/api/play/playinfo?surl={surl.group(1)}"
             print("📡 Trying API with surl:", api)
             r = session.get(api, timeout=30)
+            with open("debug_api.log", "w", encoding="utf-8") as f:
+                f.write(r.text[:5000])
             try:
                 data = r.json()
                 video_links = collect_video_links(data)
@@ -106,6 +113,8 @@ def extract_and_download(url: str):
             api = f"https://www.terabox.com/api/play/playinfo?shareid={shareid.group(1)}&uk={uk.group(1)}"
             print("📡 Trying API with shareid & uk:", api)
             r = session.get(api, timeout=30)
+            with open("debug_api2.log", "w", encoding="utf-8") as f:
+                f.write(r.text[:5000])
             try:
                 data = r.json()
                 video_links = collect_video_links(data)
@@ -122,7 +131,7 @@ def extract_and_download(url: str):
     selected = next((l for q in pref for l in video_links if q in l), video_links[0])
     print("🎬 Selected:", selected)
 
-    # Download
+    # Download video
     vres = session.get(selected, stream=True, timeout=120)
     if vres.status_code == 200:
         tmp = tempfile.mktemp(suffix=".mp4")
@@ -135,7 +144,7 @@ def extract_and_download(url: str):
     return None
 
 
-# ✅ Recursive link collector
+# ✅ Collect links recursively
 def collect_video_links(obj):
     links = []
     def _scan(o):
