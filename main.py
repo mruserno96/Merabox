@@ -1,6 +1,5 @@
 from flask import Flask, request
-import requests, os, tempfile, re, sys, threading
-from urllib.parse import urlparse, parse_qs
+import requests, os, re, threading, sys
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -40,8 +39,6 @@ def webhook():
         send_message(chat_id, "👋 Welcome!\nSend me a Terabox link and I’ll fetch the highest quality video for you.")
         return {"ok": True}
 
-    print(f"🔎 Received text: {text}", flush=True)
-
     if any(domain in text for domain in VALID_DOMAINS):
         send_message(chat_id, "⏱ Processing your link... Please wait.")
         threading.Thread(target=process_video, args=(chat_id, text)).start()
@@ -55,11 +52,6 @@ def send_message(chat_id, text):
     requests.post(f"{API_URL}/sendMessage", json={"chat_id": chat_id, "text": text})
 
 
-def send_video(chat_id, file_path):
-    with open(file_path, "rb") as f:
-        requests.post(f"{API_URL}/sendVideo", data={"chat_id": chat_id}, files={"video": f})
-
-
 def debug_log(chat_id, text):
     try:
         requests.post(f"{API_URL}/sendMessage", json={"chat_id": chat_id, "text": text[:3500]})
@@ -70,66 +62,39 @@ def debug_log(chat_id, text):
 # ✅ Worker
 def process_video(chat_id, url):
     try:
-        video_url = extract_video_url(url, chat_id)
-        if video_url:
-            send_message(chat_id, f"✅ Found Video Link:\n{video_url}")
-            # If file small enough, download & send
-            path = download_video(video_url)
-            if path:
-                send_video(chat_id, path)
-                os.remove(path)
-        else:
-            send_message(chat_id, "⚠️ Could not extract valid video link.")
+        html = fetch_html(url)
+        if not html:
+            send_message(chat_id, "⚠️ Could not fetch page HTML.")
+            return
+
+        # Extract <script> blocks containing window.file_list or window.playInfo
+        scripts = re.findall(r'<script.*?>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
+        target_scripts = []
+        for s in scripts:
+            if "window.file_list" in s or "window.playInfo" in s:
+                target_scripts.append(s.strip())
+
+        if not target_scripts:
+            send_message(chat_id, "⚠️ Could not find file_list / playInfo scripts.")
+            return
+
+        for i, scr in enumerate(target_scripts):
+            debug_log(chat_id, f"🔎 Script Block {i+1} (first 3000 chars):\n{scr[:3000]}")
+
+        send_message(chat_id, f"✅ Extracted {len(target_scripts)} script block(s). Use these to generate video link next.")
+
     except Exception as e:
         print("❌ Exception:", e, flush=True)
-        send_message(chat_id, "⚠️ Could not extract valid video link.")
+        send_message(chat_id, "⚠️ Error while processing link.")
 
 
-def extract_video_url(url: str, chat_id=None):
-    res = requests.get(url, headers=MOBILE_HEADERS, timeout=30)
-    html = res.text
-
-    # Extract og:image
-    m = re.search(r'<meta property="og:image" content="([^"]+)"', html)
-    if not m:
-        if chat_id:
-            debug_log(chat_id, "❌ og:image not found")
-        return None
-
-    og_image = m.group(1)
-    if chat_id:
-        debug_log(chat_id, f"🔎 og:image:\n{og_image}")
-
-    # Parse query params
-    parsed = urlparse(og_image)
-    params = parse_qs(parsed.query)
-
-    fid = params.get("fid", [""])[0]
-    sign = params.get("sign", [""])[0]
-    ts = params.get("time", [""])[0]
-    vuk = params.get("vuk", [""])[0]
-
-    if not all([fid, sign, ts, vuk]):
-        if chat_id:
-            debug_log(chat_id, f"❌ Missing params: fid={fid}, sign={sign}, time={ts}, vuk={vuk}")
-        return None
-
-    # Build test streaming link
-    video_url = f"https://data.1024tera.com/streaming?fid={fid}&time={ts}&sign={sign}&vuk={vuk}"
-    return video_url
-
-
-def download_video(video_url):
+def fetch_html(url):
     try:
-        r = requests.get(video_url, stream=True, timeout=60)
-        r.raise_for_status()
-        fd, path = tempfile.mkstemp(suffix=".mp4")
-        with os.fdopen(fd, "wb") as f:
-            for chunk in r.iter_content(1024 * 1024):
-                f.write(chunk)
-        return path
+        res = requests.get(url, headers=MOBILE_HEADERS, timeout=30)
+        res.raise_for_status()
+        return res.text
     except Exception as e:
-        print("❌ Download error:", e, flush=True)
+        print("❌ Fetch HTML error:", e, flush=True)
         return None
 
 
