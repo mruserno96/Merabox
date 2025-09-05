@@ -21,6 +21,8 @@ def home():
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json(force=True)
+    print("📩 Incoming update:", data, flush=True)
+
     if "message" not in data:
         return {"ok": True}
 
@@ -40,18 +42,15 @@ def webhook():
     return {"ok": True}
 
 
-# ✅ Send text
 def send_message(chat_id, text):
     requests.post(f"{API_URL}/sendMessage", json={"chat_id": chat_id, "text": text})
 
 
-# ✅ Send video
 def send_video(chat_id, file_path):
     with open(file_path, "rb") as f:
         requests.post(f"{API_URL}/sendVideo", data={"chat_id": chat_id}, files={"video": f})
 
 
-# ✅ Background processor
 def process_video(chat_id, url):
     try:
         video_path = extract_and_download(url)
@@ -61,70 +60,64 @@ def process_video(chat_id, url):
         else:
             send_message(chat_id, "⚠️ Could not extract valid video link.")
     except Exception as e:
-        print("❌ Exception:", e)
+        print("❌ Exception:", e, flush=True)
         send_message(chat_id, "⚠️ Could not extract valid video link.")
 
 
-# ✅ Extractor with direct logs
 def extract_and_download(url: str):
     session = requests.Session()
     res = session.get(url, allow_redirects=True, timeout=30)
     html = res.text
-    print("🔎 HTML Preview:", html[:500])  # show first 500 chars
+    print("🔎 HTML Preview:", html[:500], flush=True)
 
     video_links = []
 
-    # Method 1: JSON inside HTML
     m = re.search(r'window\.playInfo\s*=\s*(\{.*?\});', html, re.DOTALL)
     if m:
         try:
             data = json.loads(m.group(1))
             video_links = collect_video_links(data)
-            print("✅ Found links in window.playInfo:", video_links)
+            print("✅ Found links in window.playInfo:", video_links, flush=True)
         except Exception as e:
-            print("❌ Failed HTML JSON parse:", e)
+            print("❌ Failed HTML JSON parse:", e, flush=True)
 
-    # Method 2: API with surl
     if not video_links:
         surl = re.search(r"surl=([a-zA-Z0-9_-]+)", url)
         if surl:
             api = f"https://www.1024tera.com/api/play/playinfo?surl={surl.group(1)}"
-            print("📡 Trying API with surl:", api)
+            print("📡 Trying API with surl:", api, flush=True)
             r = session.get(api, timeout=30)
-            print("🔎 API Response Preview:", r.text[:500])
+            print("🔎 API Response Preview:", r.text[:500], flush=True)
             try:
                 data = r.json()
                 video_links = collect_video_links(data)
-                print("✅ Found links in surl API:", video_links)
+                print("✅ Found links in surl API:", video_links, flush=True)
             except Exception as e:
-                print("❌ surl API failed:", e)
+                print("❌ surl API failed:", e, flush=True)
 
-    # Method 3: API with shareid & uk
     if not video_links:
         shareid = re.search(r"shareid=(\d+)", html)
         uk = re.search(r"uk=(\d+)", html)
         if shareid and uk:
             api = f"https://www.terabox.com/api/play/playinfo?shareid={shareid.group(1)}&uk={uk.group(1)}"
-            print("📡 Trying API with shareid & uk:", api)
+            print("📡 Trying API with shareid & uk:", api, flush=True)
             r = session.get(api, timeout=30)
-            print("🔎 API Response 2 Preview:", r.text[:500])
+            print("🔎 API Response 2 Preview:", r.text[:500], flush=True)
             try:
                 data = r.json()
                 video_links = collect_video_links(data)
-                print("✅ Found links in shareid+uk API:", video_links)
+                print("✅ Found links in shareid+uk API:", video_links, flush=True)
             except Exception as e:
-                print("❌ shareid+uk API failed:", e)
+                print("❌ shareid+uk API failed:", e, flush=True)
 
     if not video_links:
-        print("⚠️ No video links found at all")
+        print("⚠️ No video links found at all", flush=True)
         return None
 
-    # Pick highest quality
     pref = ["1080", "720", "480", "360"]
     selected = next((l for q in pref for l in video_links if q in l), video_links[0])
-    print("🎬 Selected:", selected)
+    print("🎬 Selected:", selected, flush=True)
 
-    # Download video
     vres = session.get(selected, stream=True, timeout=120)
     if vres.status_code == 200:
         tmp = tempfile.mktemp(suffix=".mp4")
@@ -137,7 +130,6 @@ def extract_and_download(url: str):
     return None
 
 
-# ✅ Collect links recursively
 def collect_video_links(obj):
     links = []
     def _scan(o):
