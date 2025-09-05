@@ -1,5 +1,7 @@
 from flask import Flask, request
-import requests, os, re, threading, sys
+import os, threading, tempfile, asyncio
+from playwright.async_api import async_playwright
+import requests, json, re, sys
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -13,10 +15,6 @@ VALID_DOMAINS = [
     "teraboxapp.com",
     "1024terabox.com",
 ]
-
-MOBILE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1"
-}
 
 app = Flask(__name__)
 
@@ -36,12 +34,12 @@ def webhook():
     text = data["message"].get("text", "").strip()
 
     if text == "/start":
-        send_message(chat_id, "👋 Welcome!\nSend me a Terabox link and I’ll fetch the highest quality video for you.")
+        send_message(chat_id, "👋 Welcome!\nSend me a Terabox shortlink and I’ll fetch the video for you.")
         return {"ok": True}
 
     if any(domain in text for domain in VALID_DOMAINS):
         send_message(chat_id, "⏱ Processing your link... Please wait.")
-        threading.Thread(target=process_video, args=(chat_id, text)).start()
+        threading.Thread(target=lambda: asyncio.run(process_video(chat_id, text))).start()
     else:
         send_message(chat_id, "⚠️ That doesn’t look like a Terabox link.")
     return {"ok": True}
@@ -51,6 +49,9 @@ def webhook():
 def send_message(chat_id, text):
     requests.post(f"{API_URL}/sendMessage", json={"chat_id": chat_id, "text": text})
 
+def send_video(chat_id, file_path):
+    with open(file_path, "rb") as f:
+        requests.post(f"{API_URL}/sendVideo", data={"chat_id": chat_id}, files={"video": f})
 
 def debug_log(chat_id, text):
     try:
@@ -59,42 +60,74 @@ def debug_log(chat_id, text):
         pass
 
 
-# ✅ Worker
-def process_video(chat_id, url):
+# ================== Playwright Extractor ==================
+async def process_video(chat_id, url):
     try:
-        html = fetch_html(url)
-        if not html:
-            send_message(chat_id, "⚠️ Could not fetch page HTML.")
-            return
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            context = await browser.new_context()
+            page = await context.new_page()
 
-        # Extract <script> blocks containing window.file_list or window.playInfo
-        scripts = re.findall(r'<script.*?>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
-        target_scripts = []
-        for s in scripts:
-            if "window.file_list" in s or "window.playInfo" in s:
-                target_scripts.append(s.strip())
+            await page.goto(url, timeout=60000)
+            await page.wait_for_load_state("networkidle", timeout=60000)
 
-        if not target_scripts:
-            send_message(chat_id, "⚠️ Could not find file_list / playInfo scripts.")
-            return
+            # Extract window.file_list or window.playInfo
+            file_list = await page.evaluate("window.file_list || window.playInfo || null")
+            if not file_list:
+                send_message(chat_id, "⚠️ Could not extract file info from page.")
+                await browser.close()
+                return
 
-        for i, scr in enumerate(target_scripts):
-            debug_log(chat_id, f"🔎 Script Block {i+1} (first 3000 chars):\n{scr[:3000]}")
+            # Convert to JSON string for debug
+            file_json = json.dumps(file_list, indent=2)
+            debug_log(chat_id, "🔎 file_list JSON:\n" + file_json[:3500])
 
-        send_message(chat_id, f"✅ Extracted {len(target_scripts)} script block(s). Use these to generate video link next.")
+            # Extract parameters
+            # fs_id, sign, uk, timestamp, surl
+            try:
+                file0 = file_list[0] if isinstance(file_list, list) else list(file_list.values())[0]
+                fs_id = file0.get("fs_id")
+                sign = file0.get("sign")
+                uk = file0.get("uk")
+                timestamp = file0.get("timestamp") or file0.get("time") or 0
+                surl = file0.get("surl") or ""
+
+                if not all([fs_id, sign, uk]):
+                    send_message(chat_id, "⚠️ Missing required parameters in file info.")
+                    await browser.close()
+                    return
+
+                # Build playable video URL
+                video_url = f"https://www.1024tera.com/api/play/playinfo?app_id=250528&fid_list=[{fs_id}]&sign={sign}&timestamp={timestamp}&uk={uk}&surl={surl}"
+                send_message(chat_id, f"✅ Playable Video URL:\n{video_url}")
+
+                # Optional: download and send video (if <50MB)
+                path = download_video(video_url)
+                if path:
+                    send_video(chat_id, path)
+                    os.remove(path)
+
+            except Exception as e:
+                send_message(chat_id, f"❌ Error parsing file info: {e}")
+
+            await browser.close()
 
     except Exception as e:
         print("❌ Exception:", e, flush=True)
-        send_message(chat_id, "⚠️ Error while processing link.")
+        send_message(chat_id, f"⚠️ Could not process the link: {e}")
 
 
-def fetch_html(url):
+def download_video(video_url):
     try:
-        res = requests.get(url, headers=MOBILE_HEADERS, timeout=30)
-        res.raise_for_status()
-        return res.text
+        r = requests.get(video_url, stream=True, timeout=60)
+        r.raise_for_status()
+        fd, path = tempfile.mkstemp(suffix=".mp4")
+        with os.fdopen(fd, "wb") as f:
+            for chunk in r.iter_content(1024*1024):
+                f.write(chunk)
+        return path
     except Exception as e:
-        print("❌ Fetch HTML error:", e, flush=True)
+        print("❌ Download error:", e, flush=True)
         return None
 
 
